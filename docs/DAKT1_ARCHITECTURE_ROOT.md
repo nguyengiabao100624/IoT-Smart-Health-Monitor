@@ -20,9 +20,9 @@ Thiết bị đeo (Wearable/Mini Station) hỗ trợ theo dõi sức khỏe ngư
 ## 3. Bản đồ Module
 Giao thức cụ thể ở từng tính năng, AI hãy tra cứu các file sau nằm trong thư mục `docs/`:
 
-1. **[module_ai_fall_detection.md](./docs/module_ai_fall_detection.md)**: Logic phát hiện té ngã 3 lớp, cửa sổ trượt AI và cấu hình Edge Impulse.
-2. **[module_health_sensors.md](./docs/module_health_sensors.md)**: Logics MAX30102, bộ lọc nhịp tim Median Filter, cảnh báo sốt & môi trường, cơ chế Sensor Fusion.
-3. **[module_ui_and_cloud.md](./docs/module_ui_and_cloud.md)**: Máy trạng thái giao diện TFT, mã QR định danh, kết nối mạng WiFi/mDNS và đồng bộ Firebase Realtime DB.
+1. **[module_ai_fall_detection.md](module_ai_fall_detection.md)**: Logic phát hiện té ngã 3 lớp, cửa sổ trượt AI và cấu hình Edge Impulse.
+2. **[module_health_sensors.md](module_health_sensors.md)**: Logics MAX30102, bộ lọc nhịp tim Median Filter, cảnh báo sốt & môi trường, cơ chế Sensor Fusion.
+3. **[module_ui_and_cloud.md](module_ui_and_cloud.md)**: Máy trạng thái giao diện TFT, mã QR định danh, kết nối mạng WiFi/mDNS và đồng bộ Firebase Realtime DB.
 
 ## 4. Biên dịch & Vận hành
 - Platform: **PlatformIO** (`platformio.ini`)
