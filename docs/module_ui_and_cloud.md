@@ -1,4 +1,4 @@
-# Module Giao diện (Màn hình) và Kám Nối (Cloud Firebase)
+# Module Giao diện (Màn hình) và Kết Nối (Cloud Firebase)
 
 > **File liên kết:** `src/main.cpp`
 > **Công nghệ:** TFT ST7789, Firebase RTDB.
