@@ -164,13 +164,14 @@ unsigned long cancelCooldownUntil =
 
 int validSamplesCollected = 0;
 int ignoredSamples = 0;
-const int SAMPLES_TO_IGNORE = 2;
-const int TARGET_SAMPLES = 5;
+const int SAMPLES_TO_IGNORE = 4; // Tăng từ 2→4: bỏ thêm mẫu nhiễu đầu
+const int TARGET_SAMPLES =
+    7; // Tăng từ 5→7: cần nhiều mẫu hợp lệ hơn mới xác nhận
 
 int lastBPM = 0;
 int lastSpO2 = 0;
 
-const int FILTER_SIZE = 9;
+const int FILTER_SIZE = 13; // Tăng từ 9→13: cửa sổ median rộng hơn cho ổn định
 int bpmHistory[FILTER_SIZE] = {0}, spo2History[FILTER_SIZE] = {0};
 int bpmCount = 0, spo2Count = 0;
 int bpmIndex = 0, spo2Index = 0;
@@ -437,81 +438,129 @@ void updateMAX30102Fast() {
                                          &validSPO2, &heartRateValue,
                                          &validHeartRate);
 
-  // Khôi phục: Nếu tay vẫn đang nằm trên cảm biến và máy có chạy phép tính, vẫn
-  // gia hạn thời gian sống
-  if (fingerPresent && heartRateValue > 0 && spo2 > 0) {
+  // ========== KIỂM TRA DAO ĐỘNG TÍN HIỆU CHO PHÁT HIỆN MẤT MẠCH ==========
+  // Khi tim đập: IR dao động rõ (peak-to-peak > 300) do máu bơm qua mao mạch
+  // Khi tim dừng (hoặc giấy): IR phẳng, không dao động
+  // Dùng để quyết định có gia hạn "sự sống" hay không
+  int32_t irMin = (int32_t)irBuffer[75], irMax = (int32_t)irBuffer[75];
+  for (int i = 76; i < 100; i++) {
+    if ((int32_t)irBuffer[i] < irMin)
+      irMin = (int32_t)irBuffer[i];
+    if ((int32_t)irBuffer[i] > irMax)
+      irMax = (int32_t)irBuffer[i];
+  }
+  bool hasPulsatileSignal = ((irMax - irMin) > 300);
+
+  // CHỈ gia hạn sự sống khi tín hiệu CÓ dao động thật (tim đang đập)
+  // Khi tim dừng đột ngột: dao động biến mất → lastAliveTime đóng băng → 15s
+  // timeout
+  if (fingerPresent && validHeartRate && validSPO2 && spo2 >= 85 &&
+      hasPulsatileSignal) {
     lastAliveTime = millis();
   }
 
-  // Kiểm duyệt nghiêm ngặt theo chuẩn nhà sản xuất Maxim — KHÔNG BAO GIỜ nới
-  // lỏng để chống rác nhảy loạn (ví dụ 109)
+  // isValid KHÔNG dùng pulsatile check → BPM vẫn xử lý bình thường
   bool isValid = (validHeartRate && validSPO2 && spo2 >= 85 && spo2 <= 100);
 
   if (isValid) {
     int currentBPM = heartRateValue;
 
-    // Khôi phục: Thuật toán phát hiện sóng đôi (Dicrotic Notch) thông minh
+    // ========== GIAI ĐOẠN 1: PHÁT HIỆN SÓNG ĐÔI (Dicrotic Notch) ==========
     if (smoothBPM > 0) {
-      // Nới lỏng rào cản nhận diện sóng dội từ 1.6x xuống 1.35x.
-      // Do đôi khi giá trị đo mượt đầu tiên bị tính nhỉnh hơn thực tế (vd 75
-      // thay vì 58). Gấp đôi 58 là 116. 116 / 75 = 1.54. Nếu để 1.6x như cũ
-      // thuật toán sẽ để lọt con số 116!
-      if (currentBPM > (smoothBPM * 1.35) && currentBPM < (smoothBPM * 2.6)) {
+      // REJECT: Giá trị vượt quá 2.4x smoothBPM là nhiễu cực đoan
+      if (currentBPM > (smoothBPM * 2.4)) {
+        return;
+      }
+      // REJECT: Giá trị thấp bất thường (< 50% smoothBPM)
+      if (currentBPM < (smoothBPM * 0.5)) {
+        return;
+      }
+      // FIX: Dùng CẢ relative (1.30x) VÀ absolute (+18 BPM) để bắt sóng đôi
+      // Trước đây chỉ dùng 1.30x → raw=100 khi smooth=79 (1.27x) lọt qua!
+      // Giờ: 100 > 79+18=97 → BẮT ĐƯỢC!
+      if (currentBPM > (smoothBPM * 1.30) ||
+          (currentBPM > (smoothBPM + 18) && currentBPM > 85)) {
         currentBPM = currentBPM / 2;
       }
     } else {
-      // Lúc mới bắt đầu đo (đang nghỉ ngơi), nhịp >= 90 đa phần là sóng đôi dội
-      // do thành mạch dẻo dai (người trẻ)
-      if (currentBPM >= 85) {
-        currentBPM = currentBPM / 2;
+      // Lần đo đầu tiên: Thử CẢ raw và halved, chọn giá trị gần vùng nghỉ nhất
+      // Vùng nghỉ điển hình: 55-80 BPM
+      int halved = currentBPM / 2;
+      if (currentBPM >= 100) {
+        // >= 100 chắc chắn là sóng đôi khi nghỉ ngơi
+        currentBPM = halved;
+      } else if (currentBPM >= 80) {
+        // 80-99: Ưu tiên halved nếu halved nằm trong vùng hợp lý (>= 45)
+        if (halved >= 45) {
+          currentBPM = halved;
+        }
+        // else giữ nguyên raw (trường hợp raw=80-89, halved=40-44 quá thấp)
       }
+      // < 80: giữ nguyên, đây là nhịp thật
     }
 
-    // Khôi phục: Dùng bộ lọc Smooth (EMA filter) để chặn các cú nhảy loạn
+    // ========== GIAI ĐOẠN 2: KIỂM TRA RANGE TRƯỚC KHI CẬP NHẬT EMA ==========
+    // FIX: Di chuyển range check LÊN TRƯỚC EMA update
+    // Trước đây EMA được cập nhật trước → giá trị rác ô nhiễm smoothBPM dù bị
+    // reject!
+    if (currentBPM < 45 || currentBPM > 130) {
+      return; // Bỏ qua hoàn toàn, KHÔNG làm ô nhiễm smoothBPM
+    }
+
+    // ========== GIAI ĐOẠN 3: EMA FILTER (chỉ chạy với giá trị đã validated)
+    // ==========
     if (smoothBPM == 0) {
       smoothBPM = currentBPM;
     } else {
-      smoothBPM =
-          (smoothBPM * 0.8) + (currentBPM * 0.2); // Tin cậy 80% mượt, 20% mới
+      smoothBPM = (smoothBPM * 0.85) + (currentBPM * 0.15);
     }
+
+    // ========== GIAI ĐOẠN 4: CROSS-VALIDATION VỚI MEDIAN BUFFER ==========
+    if (bpmCount >= 3) {
+      int currentMedian = getFilteredBPM();
+      if (smoothBPM > currentMedian * 1.20) {
+        smoothBPM = currentMedian * 1.10;
+      } else if (smoothBPM < currentMedian * 0.80) {
+        smoothBPM = currentMedian * 0.90;
+      }
+    }
+
     currentBPM = (int)smoothBPM;
 
-    // Chỉ chấp nhận nhịp tim trong khoảng sinh lý hợp lệ (40-140 BPM)
-    if (currentBPM >= 40 && currentBPM <= 140) {
-      if (ignoredSamples < SAMPLES_TO_IGNORE) {
-        ignoredSamples++;
-      } else {
-        if (validSamplesCollected < TARGET_SAMPLES) {
-          addBPMValue(currentBPM);
-          addSpO2Value(spo2);
-          validSamplesCollected++;
-          measurementProgress =
-              10 + (validSamplesCollected * 90 / TARGET_SAMPLES);
+    // ========== GIAI ĐOẠN 5: THÊM VÀO BUFFER ==========
+    if (ignoredSamples < SAMPLES_TO_IGNORE) {
+      ignoredSamples++;
+    } else {
+      if (validSamplesCollected < TARGET_SAMPLES) {
+        addBPMValue(currentBPM);
+        addSpO2Value(spo2);
+        validSamplesCollected++;
+        measurementProgress =
+            10 + (validSamplesCollected * 90 / TARGET_SAMPLES);
 
-          if (validSamplesCollected >= TARGET_SAMPLES) {
-            measurementProgress = 100;
-            measureCompleteTime = millis();
-            lastContinuousUpdateTime = millis();
-            lastMeasureTimeStr = currentTimeStr;
+        if (validSamplesCollected >= TARGET_SAMPLES) {
+          measurementProgress = 100;
+          measureCompleteTime = millis();
+          lastContinuousUpdateTime = millis();
+          lastMeasureTimeStr = currentTimeStr;
 
-            lastBPM = getFilteredBPM();
-            lastSpO2 = getFilteredSpO2();
-            needGeminiFetch = true;
-          }
-        } else if (measurementProgress == 100) {
-          addBPMValue(currentBPM);
-          addSpO2Value(spo2);
+          lastBPM = getFilteredBPM();
+          lastSpO2 = getFilteredSpO2();
+          needGeminiFetch = true;
+        }
+      } else if (measurementProgress == 100) {
+        addBPMValue(currentBPM);
+        addSpO2Value(spo2);
 
-          if (millis() - lastContinuousUpdateTime >= 2000) {
-            lastBPM = getFilteredBPM();
-            lastSpO2 = getFilteredSpO2();
-            if (dataMutex != NULL)
-              xSemaphoreTake(dataMutex, portMAX_DELAY);
-            lastMeasureTimeStr = currentTimeStr;
-            if (dataMutex != NULL)
-              xSemaphoreGive(dataMutex);
-            lastContinuousUpdateTime = millis();
-          }
+        if (millis() - lastContinuousUpdateTime >= 2000) {
+          lastBPM = getFilteredBPM();
+          lastSpO2 = getFilteredSpO2();
+          if (dataMutex != NULL)
+            xSemaphoreTake(dataMutex, portMAX_DELAY);
+          lastMeasureTimeStr = currentTimeStr;
+          if (dataMutex != NULL)
+            xSemaphoreGive(dataMutex);
+          lastContinuousUpdateTime = millis();
         }
       }
     }
@@ -627,7 +676,8 @@ void handleTouchToggle() {
         validSamplesCollected = 0;
         ignoredSamples = 0;
         cancelCooldownUntil =
-            millis() + 3000; // Cooldown 3 giây trước khi cho phép đo lại
+            millis() +
+            5000; // Cooldown 5 giây trước khi cho phép đo lại (tăng từ 3s)
         bpmCount = 0;
         spo2Count = 0;
         bpmIndex = 0;
@@ -1356,7 +1406,7 @@ void TaskFirebase(void *pvParameters) {
       if (fingerPresent) {
         if (measurementProgress < 100) {
           trangThaiDo = "Dang do...";
-          // Timeout phát hiện mạch: 45 giây
+          // Timeout phát hiện mạch lần đầu: 45 giây
           if (pulseSearchStart > 0 && (millis() - pulseSearchStart > 45000)) {
             isEmergencyFlatline = true;
             isHealthAlert = true;
@@ -1367,13 +1417,16 @@ void TaskFirebase(void *pvParameters) {
               xSemaphoreGive(dataMutex);
             lastBPM = 0;
             lastSpO2 = 0;
+            fingerPresent = false;   // FIX: Reset trạng thái tay để thoát đo
             measurementProgress = 0; // Bẻ gãy thanh tiến trình đo đạc
             pulseSearchStart = 0;    // Ngăn chặn timeout gọi liên tục
+            smoothBPM = 0;
           }
         } else {
           trangThaiDo = "Do lien tuc";
-          // Cảnh báo MẤT MẠCH khi đo liên tục: 45 giây không tìm thấy nhịp
-          if (lastAliveTime > 0 && (millis() - lastAliveTime > 45000)) {
+          // FIX: Cảnh báo MẤT MẠCH khi đo liên tục: 15 giây (giảm từ 45s)
+          // Trong tình huống thực (dừng tim đột ngột), 15s đã đủ xác nhận
+          if (lastAliveTime > 0 && (millis() - lastAliveTime > 15000)) {
             isEmergencyFlatline = true;
             isHealthAlert = true;
             if (dataMutex != NULL)
@@ -1383,9 +1436,11 @@ void TaskFirebase(void *pvParameters) {
               xSemaphoreGive(dataMutex);
             lastBPM = 0;
             lastSpO2 = 0;
+            fingerPresent = false;   // FIX: Reset trạng thái tay để thoát đo
             measurementProgress = 0; // Đẩy người dùng ra khỏi màn hình đo
             pulseSearchStart = 0;
             lastContinuousUpdateTime = 0;
+            smoothBPM = 0;
           }
         }
       }
